@@ -1,0 +1,68 @@
+{\rtf1\ansi\ansicpg1252\cocoartf2822
+\cocoatextscaling0\cocoaplatform0{\fonttbl\f0\fswiss\fcharset0 Helvetica;}
+{\colortbl;\red255\green255\blue255;}
+{\*\expandedcolortbl;;}
+\paperw11900\paperh16840\margl1440\margr1440\vieww11520\viewh8400\viewkind0
+\pard\tx720\tx1440\tx2160\tx2880\tx3600\tx4320\tx5040\tx5760\tx6480\tx7200\tx7920\tx8640\pardirnatural\partightenfactor0
+
+\f0\fs24 \cf0 from scapy.all import sniff\
+import pandas as pd\
+import numpy as np\
+from sklearn.ensemble import IsolationForest\
+from sklearn.preprocessing import StandardScaler\
+from sklearn.metrics import classification_report\
+import matplotlib.pyplot as plt\
+from datetime import datetime\
+\
+# Parameters\
+interface = 'en0'  # Replace 'en0' with your Wi-Fi interface name\
+capture_duration = 30  # Capture for 30 seconds\
+packet_features = []\
+\
+# Function to extract features from packets\
+def process_packet(pkt):\
+    try:\
+        time = float(pkt.time)\
+        length = len(pkt)\
+        proto = pkt.payload.name if pkt.payload else 'Unknown'\
+        packet_features.append([time, length, proto])\
+    except Exception as e:\
+        print(f"Error processing packet: \{e\}")\
+\
+print(f"Starting live capture on interface \{interface\} for \{capture_duration\} seconds...")\
+sniff(iface=interface, prn=process_packet, timeout=capture_duration)\
+print("Capture complete!")\
+\
+# Convert to DataFrame\
+df = pd.DataFrame(packet_features, columns=['Time', 'Length', 'Protocol'])\
+df['Protocol'] = pd.factorize(df['Protocol'])[0]\
+\
+# Scale data\
+scaler = StandardScaler()\
+X_scaled = scaler.fit_transform(df[['Time', 'Length', 'Protocol']])\
+\
+# Train Isolation Forest for anomaly detection\
+model = IsolationForest(contamination=0.1, random_state=42)\
+model.fit(X_scaled)\
+\
+# Predict anomalies\
+y_pred = model.predict(X_scaled)\
+\
+# Visualization\
+plt.figure(figsize=(10,6))\
+plt.scatter(df['Time'], df['Length'], c=['red' if x==-1 else 'green' for x in y_pred], cmap='coolwarm')\
+plt.xlabel("Time")\
+plt.ylabel("Packet Length")\
+plt.title("Live Network Threat Detection")\
+plt.show()\
+\
+# Summary\
+num_anomalies = np.sum(y_pred == -1)\
+total_packets = len(y_pred)\
+print(f"Total Packets: \{total_packets\}")\
+print(f"Anomalies Detected: \{num_anomalies\}")\
+if num_anomalies > 0:\
+    print("\uc0\u9888 \u65039  Potential network threats detected!")\
+else:\
+    print("\uc0\u9989  Network seems safe.")\
+}

@@ -1,68 +1,168 @@
-{\rtf1\ansi\ansicpg1252\cocoartf2822
-\cocoatextscaling0\cocoaplatform0{\fonttbl\f0\fswiss\fcharset0 Helvetica;}
-{\colortbl;\red255\green255\blue255;}
-{\*\expandedcolortbl;;}
-\paperw11900\paperh16840\margl1440\margr1440\vieww11520\viewh8400\viewkind0
-\pard\tx720\tx1440\tx2160\tx2880\tx3600\tx4320\tx5040\tx5760\tx6480\tx7200\tx7920\tx8640\pardirnatural\partightenfactor0
+# ======================================================
+# ML-Based Network Intrusion Detection System
+# Flow-Level Behavioral Modeling + Isolation Forest
+# Supports: Live Capture OR PCAP File
+# ======================================================
 
-\f0\fs24 \cf0 from scapy.all import sniff\
-import pandas as pd\
-import numpy as np\
-from sklearn.ensemble import IsolationForest\
-from sklearn.preprocessing import StandardScaler\
-from sklearn.metrics import classification_report\
-import matplotlib.pyplot as plt\
-from datetime import datetime\
-\
-# Parameters\
-interface = 'en0'  # Replace 'en0' with your Wi-Fi interface name\
-capture_duration = 30  # Capture for 30 seconds\
-packet_features = []\
-\
-# Function to extract features from packets\
-def process_packet(pkt):\
-    try:\
-        time = float(pkt.time)\
-        length = len(pkt)\
-        proto = pkt.payload.name if pkt.payload else 'Unknown'\
-        packet_features.append([time, length, proto])\
-    except Exception as e:\
-        print(f"Error processing packet: \{e\}")\
-\
-print(f"Starting live capture on interface \{interface\} for \{capture_duration\} seconds...")\
-sniff(iface=interface, prn=process_packet, timeout=capture_duration)\
-print("Capture complete!")\
-\
-# Convert to DataFrame\
-df = pd.DataFrame(packet_features, columns=['Time', 'Length', 'Protocol'])\
-df['Protocol'] = pd.factorize(df['Protocol'])[0]\
-\
-# Scale data\
-scaler = StandardScaler()\
-X_scaled = scaler.fit_transform(df[['Time', 'Length', 'Protocol']])\
-\
-# Train Isolation Forest for anomaly detection\
-model = IsolationForest(contamination=0.1, random_state=42)\
-model.fit(X_scaled)\
-\
-# Predict anomalies\
-y_pred = model.predict(X_scaled)\
-\
-# Visualization\
-plt.figure(figsize=(10,6))\
-plt.scatter(df['Time'], df['Length'], c=['red' if x==-1 else 'green' for x in y_pred], cmap='coolwarm')\
-plt.xlabel("Time")\
-plt.ylabel("Packet Length")\
-plt.title("Live Network Threat Detection")\
-plt.show()\
-\
-# Summary\
-num_anomalies = np.sum(y_pred == -1)\
-total_packets = len(y_pred)\
-print(f"Total Packets: \{total_packets\}")\
-print(f"Anomalies Detected: \{num_anomalies\}")\
-if num_anomalies > 0:\
-    print("\uc0\u9888 \u65039  Potential network threats detected!")\
-else:\
-    print("\uc0\u9989  Network seems safe.")\
-}
+from scapy.all import sniff, rdpcap, IP, TCP, UDP
+from scapy.layers.inet6 import IPv6
+import pandas as pd
+import numpy as np
+from sklearn.ensemble import IsolationForest
+from sklearn.preprocessing import StandardScaler
+import matplotlib.pyplot as plt
+
+# ---------------- CONFIG ----------------
+MODE = "pcap"   # "live" or "pcap"
+
+PCAP_FILE = "real_network.pcapng"
+INTERFACE = "en0"
+CAPTURE_DURATION = 30
+# ----------------------------------------
+
+packets = []
+
+# -------- 1. Capture Packets --------
+if MODE == "live":
+    print(f"Starting live capture on {INTERFACE} for {CAPTURE_DURATION} seconds...")
+    packets = sniff(iface=INTERFACE, timeout=CAPTURE_DURATION)
+else:
+    print(f"Reading PCAP file: {PCAP_FILE}")
+    packets = rdpcap(PCAP_FILE)
+
+print("Total packets:", len(packets))
+
+
+# -------- 2. Flow Creation (Five-Tuple) --------
+flows = {}
+
+for pkt in packets:
+    if pkt.haslayer(IP) or pkt.haslayer(IPv6):
+
+        if pkt.haslayer(IP):
+            src_ip = pkt[IP].src
+            dst_ip = pkt[IP].dst
+            protocol = pkt[IP].proto
+        else:
+            src_ip = pkt[IPv6].src
+            dst_ip = pkt[IPv6].dst
+            protocol = pkt[IPv6].nh
+
+        src_port = 0
+        dst_port = 0
+
+        if pkt.haslayer(TCP):
+            src_port = pkt[TCP].sport
+            dst_port = pkt[TCP].dport
+        elif pkt.haslayer(UDP):
+            src_port = pkt[UDP].sport
+            dst_port = pkt[UDP].dport
+
+        key = (src_ip, dst_ip, src_port, dst_port, protocol)
+
+        pkt_size = len(pkt)
+        pkt_time = float(pkt.time)
+
+        if key not in flows:
+            flows[key] = {
+                "src_ip": src_ip,
+                "dst_ip": dst_ip,
+                "dst_port": dst_port,
+                "packet_count": 0,
+                "total_bytes": 0,
+                "start_time": pkt_time,
+                "end_time": pkt_time
+            }
+
+        flows[key]["packet_count"] += 1
+        flows[key]["total_bytes"] += pkt_size
+        flows[key]["end_time"] = pkt_time
+
+print("Total flows:", len(flows))
+
+
+# -------- 3. Feature Extraction --------
+flow_data = []
+
+for value in flows.values():
+    duration = value["end_time"] - value["start_time"]
+    if duration <= 0:
+        duration = 0.0001
+
+    avg_packet_size = value["total_bytes"] / value["packet_count"]
+    packets_per_sec = value["packet_count"] / duration
+
+    flow_data.append([
+        value["src_ip"],
+        value["dst_ip"],
+        value["dst_port"],
+        value["packet_count"],
+        value["total_bytes"],
+        avg_packet_size,
+        duration,
+        packets_per_sec
+    ])
+
+columns = [
+    "src_ip",
+    "dst_ip",
+    "dst_port",
+    "packet_count",
+    "total_bytes",
+    "avg_packet_size",
+    "duration",
+    "packets_per_second"
+]
+
+df = pd.DataFrame(flow_data, columns=columns)
+
+if df.empty:
+    print("No valid flows found.")
+    exit()
+
+
+# -------- 4. Prepare ML Data --------
+X = df[[
+    "packet_count",
+    "total_bytes",
+    "avg_packet_size",
+    "duration",
+    "packets_per_second",
+    "dst_port"
+]]
+
+scaler = StandardScaler()
+X_scaled = scaler.fit_transform(X)
+
+
+# -------- 5. Isolation Forest --------
+model = IsolationForest(contamination=0.05, random_state=42)
+model.fit(X_scaled)
+
+df["prediction"] = model.predict(X_scaled)
+df["anomaly"] = df["prediction"].apply(lambda x: 1 if x == -1 else 0)
+
+
+# -------- 6. Reporting --------
+total_flows = len(df)
+anomalies = df["anomaly"].sum()
+
+print("\n========== ANALYSIS REPORT ==========")
+print("Total Flows:", total_flows)
+print("Anomalous Flows:", anomalies)
+print("Normal Flows:", total_flows - anomalies)
+
+print("\nTop Suspicious Source IPs:")
+print(df[df["anomaly"] == 1]["src_ip"].value_counts().head())
+
+print("\nTop Suspicious Destination Ports:")
+print(df[df["anomaly"] == 1]["dst_port"].value_counts().head())
+
+
+# -------- 7. Visualization --------
+plt.figure()
+plt.hist(df["anomaly"])
+plt.title("Anomaly Distribution (0=Normal, 1=Anomaly)")
+plt.xlabel("Anomaly")
+plt.ylabel("Count")
+plt.show()
